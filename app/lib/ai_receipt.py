@@ -11,7 +11,7 @@ from PIL import Image, ImageOps
 from paddleocr import PaddleOCR
 
 
-DEFAULT_MAX_OCR_SIDE = 1700
+DEFAULT_MAX_OCR_SIDE = 1400
 
 KNOWN_MERCHANTS = [
     "Walmart", "Walmart Supercentre", "Costco", "Costco Wholesale",

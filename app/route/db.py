@@ -3,9 +3,7 @@
 from datetime import datetime
 from operator import or_
 from typing import List, Optional
-
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, status
-
 from app.firebase.storage import delete_image, get_image, get_image_url, save_image
 from app.lib.branch import delete_branch_bid
 from app.lib.transaction import execute_del_transaction
@@ -225,7 +223,7 @@ async def get_receipt(
     return image_path
 
 
-# API to return multiple images compressed into a ZIP (현재는 URL 매핑 반환)
+# API to return multiple images compressed into a ZIP
 @router.get("/get-receipt-multiple/")
 async def get_receipt_multiple(
     uid: int = Depends(get_current_uid),

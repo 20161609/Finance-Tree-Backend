@@ -30,6 +30,5 @@ async def execute_del_transaction(uid: str, tid_list: list):
             # file_path = f'{uid}/{file_name}'
             await delete_image(uid, file_name)
             
-
     except Exception as e:
         print("Failed to delete transaction from PostgreSQL\n" + str(e))

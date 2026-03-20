@@ -64,7 +64,6 @@ async def verify_email(data: dict = Body(...)):
         index_elements=['email'],
         set_={'code': code, 'created_at': current_time}
     )
-
     await database.execute(query)
 
     # Send verification email
@@ -136,6 +135,8 @@ async def signup(data: dict = Body(...)):
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Email, password, and username are required.",
         )
+    
+    # Check the validation of new user.
     try:
         is_valid_password(password)
     except Exception as e:
@@ -155,19 +156,20 @@ async def signup(data: dict = Body(...)):
         )
 
     
-    # Update DB and create account
-    hashed_password = hash_password(password)
+    # create account
     query = Auth.__table__.insert().values(
         username=username,
         email=email,
-        password=hashed_password,
+        password=hash_password(password),
         create_time=datetime.utcnow(),
     )
     await database.execute(query)
     user = await database.fetch_one(Auth.__table__.select().where(Auth.email == email))
-    uid = user["uid"]
-    query = Branch.__table__.insert().values(uid=uid, path="Home")
+
+    # update account detail
+    query = Branch.__table__.insert().values(uid=user["uid"], path="Home")
     await database.execute(query)
+
     query = EmailVerification.__table__.delete().where(EmailVerification.email == email)
     await database.execute(query)
 
@@ -327,7 +329,6 @@ async def modify_password(
         )
 
     hashed_password = hash_password(password)
-
     try:
         update_query = Auth.__table__.update().where(Auth.uid == uid).values(password=hashed_password)
         await database.execute(update_query)
@@ -370,8 +371,8 @@ async def forget_password(data: dict = Body(...)):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email is required.")
 
     user = await database.fetch_one(Auth.__table__.select().where(Auth.email == email))
-    # if not user:
-    #     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User does not exist.")
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User does not exist.")
 
     # Generate temporary password
     temp_password = generate_valid_password(8)

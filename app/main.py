@@ -2,8 +2,9 @@
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.db.init import database
+from app.db.init import database, engine, Base
 from app.route import auth, db
+from app.db import model
 from app.route import test
 from app.firebase.init import initialize_firebase
 import os
@@ -42,6 +43,7 @@ initialize_firebase()
 @app.on_event("startup")
 async def startup():
     print("Connecting to the database")
+    Base.metadata.create_all(bind=engine)    
     await database.connect()
 
 # Disconnect from the database on shutdown
@@ -58,7 +60,7 @@ app.include_router(test.router, prefix="/test")
 @app.get("/")
 async def root():
     return {
-        "message": "Version Code - 36",
+        "message": "Version Code - 0.0.1",
         "FRONT": FRONT_URL,
         "BACK": BACK_URL,
     }

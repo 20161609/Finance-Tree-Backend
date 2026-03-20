@@ -3,6 +3,7 @@ serviceAccountKey.json
 
 # Ignore environment variables file
 .env
+.env.example
 
 # Ignore Python virtual environment
 venv/

@@ -1,6 +1,6 @@
 import os
 
-TARGET_EXT = ['.py', '.js', '.jsx'] # file extension
+TARGET_EXT = ['.py', '.js', '.jsx']  # file extension
 
 def dump_all_files(root=".", output_name="output.txt"):
     collected = []
@@ -11,6 +11,7 @@ def dump_all_files(root=".", output_name="output.txt"):
                 full_path = os.path.join(dirpath, f)
                 rel_path = os.path.relpath(full_path, root)
 
+                with open(full_path, "r", encoding="utf-8") as fp:
                     content = fp.read()
 
                 collected.append(f'"""\n{content}\n""" {rel_path}')

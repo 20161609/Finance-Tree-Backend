@@ -1,0 +1,1635 @@
+"""
+import os
+import fnmatch
+
+TARGET_EXT = [".py", ".js", ".jsx"]
+
+# 제외할 폴더명
+EXCLUDE_DIRS = {
+    "venv",
+    ".venv",
+    "__pycache__",
+    ".git",
+}
+
+# 제외할 파일명 / 패턴
+EXCLUDE_PATTERNS = [
+    "serviceAccountKey.json",
+    ".env",
+    ".env.example",
+    "*.pyc",
+    "*.png",
+    "*.jpg",
+    "*.jpeg",
+    "*.gif",
+    "*.bmp",
+    "*.ico",
+    "*.svg",
+]
+
+
+def should_exclude_file(filename: str) -> bool:
+    for pattern in EXCLUDE_PATTERNS:
+        if fnmatch.fnmatch(filename, pattern):
+            return True
+    return False
+
+
+def dump_all_files(root=".", output_name="output.txt"):
+    collected = []
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        # 제외 폴더는 아예 탐색 안 하도록 수정
+        dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIRS]
+
+        for filename in filenames:
+            if should_exclude_file(filename):
+                continue
+
+            _, ext = os.path.splitext(filename)
+            if ext not in TARGET_EXT:
+                continue
+
+            full_path = os.path.join(dirpath, filename)
+            rel_path = os.path.relpath(full_path, root)
+
+            try:
+                with open(full_path, "r", encoding="utf-8") as fp:
+                    content = fp.read()
+            except UnicodeDecodeError:
+                try:
+                    with open(full_path, "r", encoding="utf-8-sig") as fp:
+                        content = fp.read()
+                except Exception as e:
+                    content = f"[READ ERROR: {e}]"
+            except Exception as e:
+                content = f"[READ ERROR: {e}]"
+
+            collected.append(f'"""\n{content}\n""" {rel_path}')
+
+    with open(output_name, "w", encoding="utf-8") as out:
+        out.write("\n\n".join(collected))
+
+
+dump_all_files(".")
+""" source_collector.py
+
+"""
+# app/main.py
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from app.db.init import database, engine, Base
+from app.route import auth, db
+from app.db import model
+from app.route import test
+from app.firebase.init import initialize_firebase
+import os
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+FRONT_URL = os.getenv("FRONT_URL")
+BACK_URL = os.getenv("BACK_URL")
+
+# Create FastAPI instance
+app = FastAPI()
+
+# CORS configuration (Bearer Token + Header -> No neccesary for credentials)
+ALLOWED_ORIGINS = [
+    FRONT_URL if FRONT_URL else "https://finance-tree.vercel.app",
+    "http://localhost:3000",  # For local development
+]
+
+# Remove None & Duplication
+ALLOWED_ORIGINS = list({o for o in ALLOWED_ORIGINS if o})
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=['*'],
+    allow_credentials=False,  # No cookie..
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Initialize Firebase
+initialize_firebase()
+
+# Connect to the database on startup
+@app.on_event("startup")
+async def startup():
+    print("Connecting to the database")
+    Base.metadata.create_all(bind=engine)    
+    await database.connect()
+
+# Disconnect from the database on shutdown
+@app.on_event("shutdown")
+async def shutdown():
+    print("Disconnecting from the database")
+    await database.disconnect()
+
+# Register routes
+app.include_router(db.router, prefix="/db")
+app.include_router(auth.router, prefix="/auth")
+app.include_router(test.router, prefix="/test")
+
+@app.get("/")
+async def root():
+    return {
+        "message": "Version Code - 0.0.1",
+        "FRONT": FRONT_URL,
+        "BACK": BACK_URL,
+    }
+
+""" app\main.py
+
+"""
+import os
+
+TARGET_EXT = ['.py', '.js', '.jsx']  # file extension
+
+def dump_all_files(root=".", output_name="output.txt"):
+    collected = []
+    for dirpath, _, filenames in os.walk(root):
+        for f in filenames:
+            _, ext = os.path.splitext(f)
+            if ext in TARGET_EXT:
+                full_path = os.path.join(dirpath, f)
+                rel_path = os.path.relpath(full_path, root)
+
+                with open(full_path, "r", encoding="utf-8") as fp:
+                    content = fp.read()
+
+                collected.append(f'"""\n{content}\n""" {rel_path}')
+
+    with open(output_name, "w", encoding="utf-8") as out:
+        out.write("\n\n".join(collected))
+
+
+dump_all_files(".")
+""" app\source_collector.py
+
+"""
+# app/db/crud.py
+from datetime import datetime
+from sqlalchemy import select, func, case, and_, or_
+from app.db.model import Auth, Branch, Transaction
+from app.db.init import database
+
+# Create a new user in the Auth table
+async def create_user(email, username, password):
+    try:
+        query = Auth.__table__.insert().values(
+            email=email,
+            username=username,
+            password=password
+        )
+        await database.execute(query)
+        return {"status": True, "message": "User registered successfully"}
+    except Exception as e:
+        return {"status": False, "message": f"Failed to register user into PostgreSQL\n{str(e)}"}
+
+# Create a branch for the user
+async def upload_branch(uid: str, path: str):
+    try:
+        query = Branch.__table__.insert().values(
+            uid=uid,
+            path=path
+        )
+        await database.execute(query)
+        return {"status": True, "message": "Branch uploaded successfully"}
+    except Exception as e:
+        return {"status": False, "message": f"Failed to upload branch\n{str(e)}"}
+
+# Retrieve user information from the Auth table
+async def get_auth_postgre(uid: str):
+    query = Auth.__table__.select().where(Auth.uid == uid)
+    return await database.fetch_one(query)
+
+# Retrieve all branches for the given user
+async def get_tree_postgre(uid: str):
+    query = Branch.__table__.select().where(Branch.uid == uid)
+    return await database.fetch_all(query)
+
+# Check if a branch exists for the user
+async def is_exist_branch(uid: str, branch: str):
+    query = Branch.__table__.select().where(Branch.uid == uid).where(Branch.path == branch)
+    return await database.fetch_one(query) is not None
+
+# Add a new branch for the user
+async def add_branch(uid: str, branch: str):
+    query = Branch.__table__.insert().values(uid=uid, path=branch)
+    await database.execute(query)
+
+# Add a new transaction
+async def add_transaction_postgre(transaction: dict):
+    query = Transaction.__table__.insert().values(
+        t_date=transaction['t_date'],
+        branch=transaction['branch'],
+        cashflow=transaction['cashflow'],
+        description=transaction['description'],
+        receipt=transaction['receipt'],
+        c_date=transaction['c_date'],
+        uid=transaction['uid']
+    ).returning(Transaction.__table__.c.tid)
+    return await database.execute(query)
+
+# Delete a transaction by user ID and transaction ID
+async def delete_transaction_postgre(uid: str, tid: int):
+    try:
+        query = Transaction.__table__.delete().where(
+            Transaction.uid == uid
+        ).where(
+            Transaction.tid == tid
+        ).returning(Transaction.receipt)
+        return await database.fetch_one(query)
+    except Exception as e:
+        print(f"Failed to delete transaction from PostgreSQL\n{str(e)}")
+
+# Delete all transactions for a branch
+async def delete_branch_transaction_postgre(uid: str, branch: str):
+    try:
+        query = Transaction.__table__.delete().where(
+            (Transaction.uid == uid) & 
+            (or_(Transaction.branch == branch, Transaction.branch.like(f'{branch}/%')))
+        ).returning(Transaction.__table__.c)
+        return await database.fetch_all(query)
+    except Exception as e:
+        raise Exception(f"Failed to delete branch from PostgreSQL: {str(e)}")
+
+# Delete a branch by user ID and branch ID
+async def delete_branch_postgre(uid: str, bid: int):
+    try:
+        query = Branch.__table__.delete().where(
+            Branch.uid == uid
+        ).where(
+            Branch.bid == bid
+        ).returning(Branch.__table__.c)
+        return await database.execute(query)
+    except Exception as e:
+        raise Exception(f"Failed to delete branch from PostgreSQL: {str(e)}")
+
+# Retrieve all sub-branches for a branch
+async def get_children_postgre(uid: str, branch: str):
+    query = Branch.__table__.select().where(
+        (Branch.uid == uid) & 
+        (or_(Branch.path.like(f'{branch}/%'), Branch.path == branch))
+    )
+    return await database.fetch_all(query)
+
+# Retrieve daily transactions within a date range
+async def get_daily_postgre(uid: str, branch: str, begin_date: str, end_date: str):
+    begin_date = datetime.strptime(begin_date, '%Y-%m-%d').date()
+    end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+
+    query = Transaction.__table__.select().where(
+        (Transaction.uid == uid) &
+        (or_(Transaction.branch == branch, Transaction.branch.like(f"{branch + '/'}%"))) &
+        (Transaction.t_date.between(begin_date, end_date))
+    ).order_by(Transaction.t_date)
+
+    results = await database.fetch_all(query)
+
+    return [
+        {key: item[key] for key in ['tid', 't_date', 'branch', 'cashflow', 'description', 'receipt', 'c_date']}
+        for item in results
+    ]
+
+# Retrieve monthly transactions grouped by month
+async def get_monthly_postgre(uid: str, branch: str, begin_date: str, end_date: str):
+    begin_date = datetime.strptime(begin_date, '%Y-%m-%d').date()
+    end_date = datetime.strptime(end_date, '%Y-%m-%d').date()
+
+    monthly_label = func.to_char(Transaction.t_date, 'YYYY-MM')
+    query = (
+        select(
+            monthly_label.label('monthly'),
+            func.sum(case((Transaction.cashflow > 0, Transaction.cashflow), else_=0)).label('income'),
+            func.sum(case((Transaction.cashflow < 0, Transaction.cashflow), else_=0)).label('expenditure')
+        )
+        .where(
+            (Transaction.uid == uid) &
+            (Transaction.branch.like(f'{branch}%')) &
+            (Transaction.t_date.between(begin_date, end_date))
+        )
+        .group_by(monthly_label)
+        .order_by(monthly_label)
+    )
+    results = await database.fetch_all(query)
+
+    monthly_box = []
+    for row in results:
+        monthly_box.append({
+            'monthly': row['monthly'],
+            'income': row['income'],
+            'expenditure': abs(row['expenditure'])
+        })
+
+    return monthly_box
+
+# Delete all transactions for a user
+async def delete_all_transaction_postgre(uid: str):
+    try:
+        query = Transaction.__table__.delete().where(
+            Transaction.uid == uid
+        ).returning(Transaction.receipt)
+        return await database.fetch_all(query)
+    except Exception as e:
+        raise Exception(f"Failed to delete all transactions from PostgreSQL: {str(e)}")
+
+# Delete all branches for a user
+async def delete_all_branch_postgre(uid: str):
+    try:
+        query = Branch.__table__.delete().where(
+            Branch.uid == uid
+        ).returning(Branch.path)
+        return await database.fetch_all(query)
+    except Exception as e:
+        raise Exception(f"Failed to delete all branches from PostgreSQL: {str(e)}")
+
+# Delete a user by user ID 
+async def delete_user_postgre(uid: str):
+    try:
+        query = Auth.__table__.delete().where(
+            Auth.uid == uid
+        ).returning(Auth.uid)
+        return await database.fetch_one(query)
+    except Exception as e:
+        raise Exception(f"Failed to delete user from PostgreSQL: {str(e)}")
+
+""" app\db\crud.py
+
+"""
+# app/db/init.py
+
+import os
+from sqlalchemy import create_engine, MetaData
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker
+from databases import Database
+from dotenv import load_dotenv
+
+SQLITE, POSTGRESQL = 0, 1
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Read the database URL from environment variables
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Set up SQLAlchemy engine and metadata
+# engine = create_engine(DATABASE_URL)
+metadata = MetaData()
+Base = declarative_base()
+
+# Create a Database object for async operations
+if DATABASE_URL.startswith("sqlite"):
+    database = Database(DATABASE_URL)
+else:
+    database = Database(DATABASE_URL, ssl=True)
+
+# sync engine only for SQLAlchemy create_all / SessionLocal
+SYNC_DATABASE_URL = DATABASE_URL.replace("+aiosqlite", "")
+engine = create_engine(SYNC_DATABASE_URL)
+
+# SQLAlchemy session setup for synchronous database interactions
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+""" app\db\init.py
+
+"""
+# app/db/model.py
+
+from datetime import datetime
+from sqlalchemy import Column, String, Integer, Date, Text, ForeignKey, TIMESTAMP, Boolean, LargeBinary
+from app.db.init import Base
+
+# Transaction model
+class Transaction(Base):
+    __tablename__ = 'transaction'
+    tid = Column(Integer, primary_key=True, autoincrement=True)
+    t_date = Column(Date, nullable=False)  # Transaction date
+    branch = Column(String(255), nullable=False)  # Branch information
+    cashflow = Column(Integer, nullable=False)  # Cashflow amount
+    description = Column(Text, nullable=True)  # Optional description
+    c_date = Column(TIMESTAMP, default=datetime.utcnow)  # Creation timestamp
+    uid = Column(Integer, ForeignKey('auth.uid'), nullable=False)  # Foreign key to user ID
+    receipt = Column(String(255), nullable=True)  # Receipt image directory path in Firebase Storage
+    
+# Email verification model
+class EmailVerification(Base):
+    __tablename__ = 'email_verification'
+    code = Column(String(255), primary_key=True)  # Verification code
+    email = Column(String(255), nullable=False, unique=True)  # Prevent duplicate email
+    verified = Column(TIMESTAMP, default=None)  # Verification timestamp (optional)
+    created_at = Column(TIMESTAMP, default=datetime.utcnow)  # Creation timestamp
+
+# Auth model for user authentication
+class Auth(Base):
+    __tablename__ = 'auth'
+    uid = Column(Integer, primary_key=True, autoincrement=True)  # User ID
+    username = Column(String(255), nullable=False)  # Username
+    email = Column(String(255), nullable=False)  # User email
+    password = Column(String(255), nullable=False)  # Hashed password
+    is_active = Column(Boolean, default=True)  # User active status
+    create_time = Column(TIMESTAMP, default=datetime.utcnow)  # Account creation time
+    update_time = Column(TIMESTAMP, default=datetime.utcnow)  # Last update time
+    useai = Column(Boolean, default=False)  # Use AI for transaction categorization
+
+# Branch model for organizing branches
+class Branch(Base):
+    __tablename__ = 'branch'
+    bid = Column(Integer, primary_key=True, autoincrement=True)  # Branch ID
+    uid = Column(Integer, ForeignKey('auth.uid'), nullable=False)  # Foreign key to user ID
+    path = Column(String(255), nullable=False)  # Path for branch (e.g., directory structure)
+
+# Role model for user roles (e.g., admin, user)
+class Role(Base):
+    __tablename__ = 'role'
+    role_id = Column(Integer, primary_key=True, autoincrement=True)  # Role ID
+    role_name = Column(String(50), unique=True, nullable=False)  # Role name (e.g., admin, user)
+
+# UserRole model for many-to-many relationship between users and roles
+class UserRole(Base):
+    __tablename__ = 'user_role'
+    user_role_id = Column(Integer, primary_key=True, autoincrement=True)  # UserRole ID
+    uid = Column(Integer, ForeignKey('auth.uid'), nullable=False)  # Foreign key to user ID
+    role_id = Column(Integer, ForeignKey('role.role_id'), nullable=False)  # Foreign key to role IDs
+
+# Token model for managing JWT tokens
+class Token(Base):
+    __tablename__ = 'token'
+    token_id = Column(Integer, primary_key=True, autoincrement=True)  # Token ID
+    uid = Column(Integer, ForeignKey('auth.uid'), nullable=False)  # Foreign key to user ID
+    access_token = Column(Text, nullable=False)  # JWT access token
+    refresh_token = Column(Text, nullable=True)  # Optional refresh token
+    created_at = Column(TIMESTAMP, default=datetime.utcnow)  # Token creation timestamp
+    expires_at = Column(TIMESTAMP, nullable=False)  # Token expiration timestamp
+
+""" app\db\model.py
+
+"""
+# app/firebase/init.py
+
+import os
+
+import firebase_admin
+from dotenv import load_dotenv
+from firebase_admin import credentials
+
+load_dotenv()
+
+
+def initialize_firebase():
+    if firebase_admin._apps:
+        return
+
+    private_key = (os.getenv("FIREBASE_PRIVATE_KEY") or "").replace("\\n", "\n")
+    service_account_key = {
+        "type": os.getenv("FIREBASE_TYPE"),
+        "project_id": os.getenv("FIREBASE_PROJECT_ID"),
+        "private_key_id": os.getenv("FIREBASE_PRIVATE_KEY_ID"),
+        "private_key": private_key,
+        "client_email": os.getenv("FIREBASE_CLIENT_EMAIL"),
+        "client_id": os.getenv("FIREBASE_CLIENT_ID"),
+        "auth_uri": os.getenv("FIREBASE_AUTH_URI"),
+        "token_uri": os.getenv("FIREBASE_TOKEN_URI"),
+        "auth_provider_x509_cert_url": os.getenv("FIREBASE_AUTH_PROVIDER_X509_CERT_URL"),
+        "client_x509_cert_url": os.getenv("FIREBASE_CLIENT_X509_CERT_URL"),
+    }
+
+    cred = credentials.Certificate(service_account_key)
+
+    firebase_admin.initialize_app(
+        cred,
+        {
+            "storageBucket": os.getenv("FIREBASE_STORAGE_BUCKET"),
+        },
+    )
+""" app\firebase\init.py
+
+"""
+# app/firebase/storage.py
+
+import base64
+import hashlib
+from pathlib import Path
+import secrets
+from uuid import uuid4
+
+from fastapi import UploadFile
+from firebase_admin import storage
+from datetime import datetime
+
+def get_hashed_uid(uid: str) -> str:
+    # Hash UID with SHA256 to make it unique and not exposed
+    hash_object = hashlib.sha256(uid.encode())
+    return hash_object.hexdigest()
+
+async def delete_storage_uid(uid: str):
+    # Get File Name Format
+    hashed_uid = get_hashed_uid(uid)
+    basic_file_format = f'{hashed_uid}_'
+
+    # Delete All files from firebase storage, which has name like 'basic_file_format%'
+    bucket = storage.bucket()
+    blobs = bucket.list_blobs()
+    for blob in blobs:
+        if basic_file_format in blob.name:
+            blob.delete()
+            print(f'File {blob.name} deleted')
+
+async def save_image(uid: str, receipt: UploadFile) -> str:
+    # Extract file extension
+    file_extension = Path(receipt.filename).suffix
+    file_name = f"{uuid4()}{file_extension}"
+    dir_path = f"{uid}/{file_name}"
+
+    try:
+        bucket = storage.bucket()
+        blob = bucket.blob(dir_path)
+        blob.upload_from_string(receipt.file.read(), content_type='image/png')
+        return file_name
+    except Exception as e:
+        print(f"Failed to upload image to Firebase Storage\n{str(e)}")
+        return None
+
+async def delete_image(uid: str, file_name: str) -> str:
+    try:
+        bucket = storage.bucket()
+        blob = bucket.blob(f"{uid}/{file_name}")
+        blob.delete()
+        return {"status": True, "message": "Image deleted successfully."}
+    except Exception as e:
+        print(f"Failed to delete image from Firebase Storage\n{str(e)}")
+        return None
+
+async def get_image_url(uid: str, file_name: str) -> str:
+    try:
+        bucket = storage.bucket()
+        blob = bucket.blob(f"{uid}/{file_name}")
+        blob.make_public()
+        return blob.public_url
+    except Exception as e:
+        print(f"Failed to get image from Firebase Storage\n{str(e)}")
+        return None
+    
+async def get_image(uid: str, file_name: str) -> str:
+    file_path = f"{uid}/{file_name}"
+    bucket = storage.bucket()
+    blob = bucket.blob(file_path)
+    image = blob.download_as_bytes()
+    return base64.b64encode(image).decode('utf-8')
+
+async def delete_directory(uid: str):
+    directory_path = f"{uid}/"
+    bucket = storage.bucket()
+    blobs = bucket.list_blobs(prefix=directory_path)
+
+    for blob in blobs:
+        print(f'Deleting file: {blob.name}')
+        blob.delete()
+
+    print(f'Directory {directory_path} and its contents have been deleted.')
+
+""" app\firebase\storage.py
+
+"""
+# app/lib/branch.py
+
+from app.db.init import database
+from app.db.model import Branch
+
+# Check if the branch exists
+async def is_exist_branch(uid: str, branch: str):
+    query = Branch.__table__.select().where(Branch.uid == uid).where(Branch.path == branch)
+    return await database.fetch_one(query) is not None
+
+# Delete branch by branch ID (bid)
+async def delete_branch_bid(uid: str, bid_list: list):
+    try:
+        delete_query = Branch.__table__.delete().where(
+            (Branch.uid == uid) & 
+            (Branch.bid.in_(bid_list))
+        ).returning(Branch.__table__.c)
+        
+        return await database.fetch_all(delete_query)
+    except Exception as e:
+        raise Exception(f"Failed to delete branch from PostgreSQL: {str(e)}")
+
+""" app\lib\branch.py
+
+"""
+# app/lib/transaction.py
+
+import os
+from fastapi import UploadFile, HTTPException
+from uuid import uuid4
+from pathlib import Path
+from app.db.init import database
+from app.db.model import Transaction
+from dotenv import load_dotenv
+import os
+
+from app.firebase.storage import delete_image
+
+load_dotenv()
+
+# Delete transactions and associated receipt images
+async def execute_del_transaction(uid: str, tid_list: list):
+    try:
+        delete_query = Transaction.__table__.delete().where(
+            (Transaction.uid == uid) & 
+            (Transaction.tid.in_(tid_list))
+        ).returning(Transaction.__table__.c)
+        
+        delete_data = await database.fetch_all(delete_query)
+        for data in delete_data:
+            file_name = data['receipt']
+            if not file_name:
+                continue
+
+            # file_path = f'{uid}/{file_name}'
+            await delete_image(uid, file_name)
+            
+    except Exception as e:
+        print("Failed to delete transaction from PostgreSQL\n" + str(e))
+
+""" app\lib\transaction.py
+
+"""
+# app/lib/user.py
+
+import random
+import string
+from fastapi import HTTPException, status
+from passlib.context import CryptContext
+from datetime import datetime, timedelta
+from jose import ExpiredSignatureError, JWTError, jwt
+from dotenv import load_dotenv
+import os
+
+# Load environment variables from .env file
+load_dotenv()
+
+# JWT configuration
+JWT_KEY = os.getenv('JWT_KEY')  # Secret key, managed via .env in production
+ALGORITHM = "HS256"  # JWT signing algorithm
+ACCESS_TOKEN_EXPIRE_MINUTES = 60  # Token expiration time (60 minutes)
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Hash the password
+def hash_password(password: str) -> str:
+    """Hashes the given password."""
+    return pwd_context.hash(password)
+
+# Verify the password
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verifies the given password with the hashed password."""
+    return pwd_context.verify(plain_password, hashed_password)
+
+# Create access token with expiration
+def create_access_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()  # Copy the input data to prepare it for the token
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)  
+
+    # Set default expiration to 60 minutes
+    to_encode.update({"exp": expire})  # Add expiration time to token
+    encoded_jwt = jwt.encode(to_encode, JWT_KEY, algorithm=ALGORITHM)  # Generate the token
+    return encoded_jwt
+
+# Create refresh token with expiration
+def create_refresh_token(data: dict, expires_delta: timedelta = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(days=7)  # Refresh token is valid for 7 days
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, JWT_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+# Decode access token
+def decode_access_token(token: str):
+    try:
+        # Decode the token and validate expiration
+        payload = jwt.decode(token, JWT_KEY, algorithms=[ALGORITHM])
+        
+        # Extract user ID (sub) from the payload
+        uid: str = payload.get("sub")
+        
+        # Raise error if sub is missing
+        if uid is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        
+        # Return UID as integer
+        return int(uid)
+    
+    # Handle expired token
+    except ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    # Handle other JWT-related errors
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+# Decode refresh token
+def decode_refresh_token(token: str):
+    try:
+        payload = jwt.decode(token, JWT_KEY, algorithms=[ALGORITHM])
+        uid: str = payload.get("sub")
+        if uid is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return int(uid)
+    except ExpiredSignatureError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+# Refresh access token using refresh token
+def refresh_access_token(refresh_token: str):
+    uid = decode_refresh_token(refresh_token)
+    access_token = create_access_token(data={"sub": uid})
+    return access_token
+
+# Is Valid Password?
+def is_valid_password(password: str):
+    """Checks if the password meets the minimum requirements."""
+    # Condition1. Password must be at least 8 characters long
+    condition1 = len(password) >= 8
+    if not condition1:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must be at least 8 characters long",
+        )
+    
+    # Condition 2. Password must contain at least one lowercase letter
+    condition2 = any(char.islower() for char in password)
+    if not condition2:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must contain at least one lowercase letter",
+        )
+    
+    # Condition 3. Special Symbol Check -> !@#$%^&*()-+ (Valid Symbols)
+    # Any sympol other than the valid symbols will raise an error
+    # But Digit and Alphabet are allowed
+    valid_simbols = "!@#$%^&*-+"
+    condition3 = all(char.isalnum() or char in valid_simbols for char in password)
+    if not condition3:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must contain only valid special symbols: !@#$%^&*-+",
+        )
+
+    # Condition4. Password must contain at least one number
+    condition4 = any(char.isdigit() for char in password)
+    if not condition4:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password must contain at least one number",
+        )
+
+# Generate a valid password
+def generate_valid_password(length=8):
+    # ASCII lowercase + digits
+    if length < 8:
+        raise ValueError("Password length must be at least 8 characters")
+    
+    lowercase = string.ascii_lowercase
+    digits = string.digits
+
+    password = [
+        random.choice(lowercase),
+        random.choice(digits)
+    ]
+
+    all_valid_characters = lowercase + digits
+    password += random.choices(all_valid_characters, k=length - len(password))
+
+    random.shuffle(password)
+    return ''.join(password)
+
+""" app\lib\user.py
+
+"""
+# app/route/auth.py
+
+from typing import Optional
+from datetime import datetime, timedelta
+import os
+import secrets
+import smtplib
+
+from email.mime.text import MIMEText
+from fastapi import APIRouter, Body, Depends, Form, HTTPException, Query, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.dialects.postgresql import insert
+from dotenv import load_dotenv
+
+from app.db.init import database
+from app.db.model import Auth, Branch, EmailVerification, Token, Transaction
+from app.firebase.storage import delete_directory
+from app.lib.user import (
+    create_access_token,
+    create_refresh_token,
+    decode_access_token,
+    generate_valid_password,
+    hash_password,
+    is_valid_password,
+    verify_password,
+)
+
+# Load environment variables
+load_dotenv()
+
+MAIN_EMAIL = os.getenv("MAIN_EMAIL")
+MAIN_EMAIL_PASSWORD = os.getenv("MAIN_EMAIL_PASSWORD")
+ACCESS_TOKEN_EXPIRE_MINUTES = 60
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/signin/")
+router = APIRouter()
+
+# Get uid(Public)
+async def get_current_uid(token: str = Depends(oauth2_scheme)) -> int:
+    return decode_access_token(token)
+
+# Send email verification code
+@router.post("/verify-email/")
+async def verify_email(data: dict = Body(...)):
+    email = data.get('email')
+    if not email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email is required.")
+
+    # Check for duplicate email
+    user = await database.fetch_one(Auth.__table__.select().where(Auth.email == email))
+    if user:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email is already in use.")
+
+    # Generate verification code
+    code = secrets.token_hex(3)
+    current_time = datetime.utcnow()
+
+    # Insert or update code and timestamp in EmailVerification table
+    query = insert(EmailVerification).values(
+        code=code,
+        email=email,
+        created_at=current_time
+    ).on_conflict_do_update(
+        index_elements=['email'],
+        set_={'code': code, 'created_at': current_time}
+    )
+    await database.execute(query)
+
+    # Send verification email
+    try:
+        msg = MIMEText(f'Your verification code is: {code}')
+        msg['Subject'] = 'Verification Code'
+        msg['From'] = MAIN_EMAIL
+        msg['To'] = email
+
+        with smtplib.SMTP('smtp.gmail.com', 587) as server:
+            server.starttls()
+            server.login(MAIN_EMAIL, MAIN_EMAIL_PASSWORD)
+            server.sendmail(MAIN_EMAIL, email, msg.as_string())
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to send verification email.")
+
+
+# Verify the provided email and code
+@router.get("/verify-email/")
+async def check_verification_code(email: str = Query(...), code: str = Query(...)):
+    # Bad Request
+    if not email or not code:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email and verification code are required.")
+
+    # Verification
+    verification = await database.fetch_one(
+        EmailVerification.__table__.select().where(EmailVerification.email == email)
+    )
+    if not verification:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No verification information found for this email.",
+        )
+    if verification["code"] != code:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Verification code does not match.",
+        )
+    created_at = verification["created_at"]
+
+    # Send Email
+    current_time = datetime.utcnow()
+    if current_time - created_at > timedelta(minutes=15):
+        query = EmailVerification.__table__.delete().where(EmailVerification.email == email)
+        await database.execute(query)
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Verification code has expired.",
+        )
+
+    # Update DB.
+    query = EmailVerification.__table__.update().where(
+        EmailVerification.email == email
+    ).values(verified=datetime.utcnow())
+    await database.execute(query)
+
+    return {"message": "Email verification successful."}
+
+
+# Signup API
+@router.post("/signup/")
+async def signup(data: dict = Body(...)):
+    # Get User's info
+    email = data.get("email")
+    password = data.get("password")
+    username = data.get("username")
+    if not email or not password or not username:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email, password, and username are required.",
+        )
+    
+    # Check the validation of new user.
+    try:
+        is_valid_password(password)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    user = await database.fetch_one(Auth.__table__.select().where(Auth.email == email))
+    if user:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email is already in use.")
+
+    # Check if it can be signed up.
+    verification = await database.fetch_one(
+        EmailVerification.__table__.select().where(EmailVerification.email == email)
+    )
+    if not verification or not verification["verified"]:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Email verification is required.",
+        )
+
+    
+    # create account
+    query = Auth.__table__.insert().values(
+        username=username,
+        email=email,
+        password=hash_password(password),
+        create_time=datetime.utcnow(),
+    )
+    await database.execute(query)
+    user = await database.fetch_one(Auth.__table__.select().where(Auth.email == email))
+
+    # update account detail
+    query = Branch.__table__.insert().values(uid=user["uid"], path="Home")
+    await database.execute(query)
+
+    query = EmailVerification.__table__.delete().where(EmailVerification.email == email)
+    await database.execute(query)
+
+    return {"message": "Signup successful."}
+
+
+# Signin API
+@router.post("/signin/")
+async def signin(data: dict = Body(...)):
+    # Get User input datas [EMAIL], [PW].
+    email = data.get("email")
+    password = data.get("password")
+    if not email or not password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email and password are required.",
+        )
+    
+    # Check the validation of user inputed.
+    user = await database.fetch_one(Auth.__table__.select().where(Auth.email == email))
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User does not exist.")
+
+    if not verify_password(password, user["password"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect password.",
+        )
+
+    # DB update: get token
+    access_token = create_access_token(data={"sub": str(user["uid"])})
+    refresh_token = create_refresh_token(data={"sub": str(user["uid"])})
+    existing_token = await database.fetch_one(
+        Token.__table__.select().where(Token.uid == user["uid"])
+    )
+    if existing_token:
+        query = Token.__table__.update().where(Token.uid == user["uid"]).values(
+            access_token=access_token,
+            created_at=datetime.utcnow(),
+            expires_at=datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+        )
+    else:
+        query = Token.__table__.insert().values(
+            uid=user["uid"],
+            access_token=access_token,
+            refresh_token=refresh_token,
+            created_at=datetime.utcnow(),
+            expires_at=datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+        )
+    await database.execute(query)
+
+    # Success
+    return {
+        "access_token": access_token,
+        "token_type": "bearer",
+        "email": user["email"],
+        "username": user["username"],
+    }
+
+
+# Get user information API with token
+@router.get("/get-user/")
+async def get_user(uid: int = Depends(get_current_uid)):
+    query = Auth.__table__.select().where(Auth.uid == uid)
+    user_info = await database.fetch_one(query)
+    if not user_info:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, 
+            detail="User information not found.")
+    return {"message": user_info}
+
+
+# Delete account API
+@router.delete("/delete-account/")
+async def delete_account(uid: int = Depends(get_current_uid)):
+    # Delete user token from Token table
+    try:
+        delete_token_query = Token.__table__.delete().where(Token.uid == uid)
+        await database.execute(delete_token_query)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete user token: {str(e)}",
+        )
+
+    # Delete user-related transactions and images
+    try:
+        delete_transactions_query = Transaction.__table__.delete().where(Transaction.uid == uid)
+        await database.execute(delete_transactions_query)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete user transactions: {str(e)}",
+        )
+
+    try:
+        await delete_directory(uid)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete user images: {str(e)}",
+        )
+
+    try:
+        delete_branches_query = Branch.__table__.delete().where(Branch.uid == uid)
+        await database.execute(delete_branches_query)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete user branches: {str(e)}",
+        )
+
+    try:
+        delete_user_query = Auth.__table__.delete().where(Auth.uid == uid)
+        await database.execute(delete_user_query)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete user account: {str(e)}",
+        )
+
+    return {"status": "success", "message": "Your account and associated data have been deleted successfully."}
+
+
+# Signout API
+@router.post("/signout/")
+async def signout(uid: int = Depends(get_current_uid)):
+    # DB delete: remove token from current user.
+    try:
+        delete_token_query = Token.__table__.delete().where(Token.uid == uid)
+        await database.execute(delete_token_query)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete the user's token: {str(e)}",
+        )
+
+    # make the localStorage empty
+    return {"status": "success", "message": "You have been signed out successfully."}
+
+
+# Modify Password API
+@router.put("/modify-password/")
+async def modify_password(
+    uid: int = Depends(get_current_uid),
+    password: Optional[str] = Form(None),
+):
+    try:
+        is_valid_password(password)
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    if not password:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Password is required.",
+        )
+
+    hashed_password = hash_password(password)
+    try:
+        update_query = Auth.__table__.update().where(Auth.uid == uid).values(password=hashed_password)
+        await database.execute(update_query)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update the password: {str(e)}",
+        )
+
+    return {"status": "success", "message": "Password updated successfully."}
+
+
+# Update User Info
+@router.put("/update-userinfo/")
+async def update_user(
+    uid: int = Depends(get_current_uid),
+    username: Optional[str] = Form(None),
+    useai: Optional[bool] = Form(None),
+):
+    try:
+        update_query = Auth.__table__.update().where(Auth.uid == uid).values(
+            username=username,
+            useai=useai,
+        )
+        await database.execute(update_query)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update user information: {str(e)}",
+        )
+
+    return {"status": "success", "message": "User information updated successfully."}
+
+
+# Forget Password? -> Update Temporary Password and Send Email
+@router.post("/forget-password/")
+async def forget_password(data: dict = Body(...)):
+    email = data.get("email")
+    if not email:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email is required.")
+
+    user = await database.fetch_one(Auth.__table__.select().where(Auth.email == email))
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User does not exist.")
+
+    # Generate temporary password
+    temp_password = generate_valid_password(8)
+    hashed_password = hash_password(temp_password)
+
+    # Update the password in the Auth table
+    try:
+        update_query = Auth.__table__.update().where(Auth.email == email).values(password=hashed_password)
+        await database.execute(update_query)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update the password: {str(e)}",
+        )
+
+    # Send temporary password via email
+    try:
+        msg = MIMEText(f'Your temporary password is: "{temp_password}"')
+        msg["Subject"] = "Temporary Password"
+        msg["From"] = MAIN_EMAIL
+        msg["To"] = email
+
+        with smtplib.SMTP("smtp.gmail.com", 587) as server:
+            server.starttls()
+            server.login(MAIN_EMAIL, MAIN_EMAIL_PASSWORD)
+            server.sendmail(MAIN_EMAIL, email, msg.as_string())
+    except Exception:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send temporary password email.",
+        )
+
+    return {"status": "success", "message": "Temporary password sent to your email."}
+
+""" app\route\auth.py
+
+"""
+# app/route/db.py
+
+from datetime import datetime
+from operator import or_
+from typing import List, Optional
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile, status
+from app.firebase.storage import delete_image, get_image, get_image_url, save_image
+from app.lib.branch import delete_branch_bid
+from app.lib.transaction import execute_del_transaction
+from app.db.crud import is_exist_branch
+from app.db.model import Branch, Transaction
+from app.db.init import database
+from app.route.auth import get_current_uid
+
+router = APIRouter()
+
+
+# API to get user's branch information
+@router.get("/get-tree/")
+async def get_user_branches(uid: int = Depends(get_current_uid)):
+    query = Branch.__table__.select().where(Branch.uid == int(uid))
+    branches = await database.fetch_all(query)
+
+    if not branches:
+        query = (
+            Branch.__table__
+            .insert()
+            .values(uid=uid, path="Home")
+            .returning(Branch.__table__.c.bid)
+        )
+        bid = await database.execute(query)
+        path = "Home"
+        return {"message": [{"bid": bid, "path": path, "uid": uid}]}
+
+    return {"message": branches}
+
+
+# API to create a new branch
+@router.post("/create-branch/")
+async def create_branch(
+    uid: int = Depends(get_current_uid),
+    body: dict = Body(...),
+):
+    parent = body.get("parent")
+    child = body.get("child")
+
+    is_exist = await is_exist_branch(uid, parent)
+    if not is_exist:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid parent path - {parent}",
+        )
+
+    path = parent + "/" + child
+    already_exist = await is_exist_branch(uid, path)
+    if already_exist:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Branch already exists - {path}",
+        )
+
+    query = Branch.__table__.insert().values(
+        uid=uid,
+        path=path,
+    )
+    await database.execute(query)
+    return {"message": "Branch created successfully"}
+
+
+# API to delete a branch
+@router.delete("/delete-branch/")
+async def delete_branch(
+    uid: int = Depends(get_current_uid),
+    branch: str = Query(...),
+):
+    is_exist = await is_exist_branch(uid, branch)
+    if not is_exist:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Branch not found - {branch}",
+        )
+
+    # Retrieve list of bids to be deleted
+    query = (
+        Branch.__table__
+        .select()
+        .where(Branch.uid == uid)
+        .where(or_(Branch.path == branch, Branch.path.like(f"{branch + '/'}%")))
+    )
+    temp = await database.fetch_all(query)
+    branch_list = [x["path"] for x in temp]
+    bid_list = [x["bid"] for x in temp]
+
+    # Retrieve list of tids to be deleted
+    query = (
+        Transaction.__table__
+        .select()
+        .where(Transaction.uid == uid)
+        .where(Transaction.branch.in_(branch_list))
+    )
+    temp = await database.fetch_all(query)
+    tid_list = [x["tid"] for x in temp]
+
+    # Delete transactions
+    await execute_del_transaction(uid, tid_list)
+
+    # Delete branches
+    await delete_branch_bid(uid, bid_list)
+
+    return {"message": "Branch deleted successfully"}
+
+
+# API to view daily transactions within a branch
+@router.get("/refer-daily-transaction/")
+async def refer_daily_transaction(
+    uid: int = Depends(get_current_uid),
+    begin_date: str = Query(...),
+    end_date: str = Query(...),
+    branch: str = Query(...),
+):
+    try:
+        begin_date_obj = datetime.strptime(begin_date, "%Y-%m-%d")
+        end_date_obj = datetime.strptime(end_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid date format. Must be in YYYY-MM-DD format.",
+        )
+
+    query = (
+        Transaction.__table__
+        .select()
+        .where(
+            (Transaction.uid == uid)
+            & (or_(Transaction.branch == branch, Transaction.branch.like(f"{branch + '/'}%")))
+            & (Transaction.t_date >= begin_date_obj)
+            & (Transaction.t_date <= end_date_obj)
+        )
+        .order_by(Transaction.t_date)
+    )
+    transactions = await database.fetch_all(query)
+    return {"message": transactions}
+
+
+# API to upload transaction data (with optional image)
+@router.post("/upload-transaction/")
+async def upload_transaction(
+    uid: int = Depends(get_current_uid),
+    t_date: str = Form(...),
+    branch: str = Form(...),
+    cashflow: int = Form(...),
+    description: Optional[str] = Form(None),
+    receipt: Optional[UploadFile] = File(None),
+):
+    try:
+        t_date_obj = datetime.strptime(t_date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid date format. Must be in YYYY-MM-DD format.",
+        )
+
+    receipt_path = None
+    if receipt:
+        try:
+            receipt_path = await save_image(uid, receipt)
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to save the image.",
+            )
+
+    try:
+        query = (
+            Transaction.__table__
+            .insert()
+            .values(
+                t_date=t_date_obj,
+                branch=branch,
+                cashflow=cashflow,
+                description=description,
+                receipt=receipt_path,
+                c_date=datetime.utcnow(),
+                uid=uid,
+            )
+            .returning(Transaction.__table__.c.tid)
+        )
+        await database.execute(query)
+    except Exception as e:
+        if receipt_path:
+            try:
+                await delete_image(uid, receipt_path)
+            except Exception as e2:
+                print("Error deleting image", e2)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to insert transaction." + str(e),
+        )
+
+    return {"message": "Transaction uploaded successfully."}
+
+
+# API to retrieve image file by transaction ID (tid)
+@router.get("/get-receipt/")
+async def get_receipt(
+    uid: int = Depends(get_current_uid),
+    tid: int = Query(...),
+):
+    query = (
+        Transaction.__table__
+        .select()
+        .where((Transaction.tid == tid) & (Transaction.uid == uid))
+    )
+    transaction = await database.fetch_one(query)
+    if not transaction:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found.")
+
+    file_name = transaction.receipt
+    if not file_name:
+        return {"receipt": None}
+
+    image_path = await get_image_url(uid, file_name)
+    return image_path
+
+
+# API to return multiple images compressed into a ZIP
+@router.get("/get-receipt-multiple/")
+async def get_receipt_multiple(
+    uid: int = Depends(get_current_uid),
+    tid_list: List[int] = Query(...),
+):
+    query = (
+        Transaction.__table__
+        .select()
+        .where(Transaction.tid.in_(tid_list))
+        .where(Transaction.uid == uid)
+    )
+    transactions = await database.fetch_all(query)
+
+    if not transactions:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Transactions not found.",
+        )
+
+    image_urls = {}
+    for transaction in transactions:
+        file_name = transaction.receipt
+        if not file_name:
+            continue
+
+        try:
+            image_url = await get_image(uid, file_name)
+            if image_url:
+                image_urls[transaction.tid] = image_url
+        except Exception as e:
+            print(f"Failed to get image from Firebase Storage\n{str(e)}")
+            continue
+
+    return image_urls
+
+
+# API to modify a transaction
+@router.put("/modify-transaction/")
+async def modify_transaction(
+    uid: int = Depends(get_current_uid),
+    tid: int = Form(...),
+    t_date: Optional[str] = Form(None),
+    branch: Optional[str] = Form(None),
+    cashflow: Optional[int] = Form(None),
+    description: Optional[str] = Form(None),
+    receipt: Optional[UploadFile] = File(None),
+):
+    query = (
+        Transaction.__table__
+        .select()
+        .where((Transaction.tid == tid) & (Transaction.uid == uid))
+    )
+    transaction = await database.fetch_one(query)
+    if not transaction:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found.")
+
+    update_data = {}
+    if t_date:
+        try:
+            update_data["t_date"] = datetime.strptime(t_date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid date format. Must be in YYYY-MM-DD format.",
+            )
+    if branch:
+        update_data["branch"] = branch
+    if cashflow is not None:
+        update_data["cashflow"] = cashflow
+    if description:
+        update_data["description"] = description
+
+    if receipt:
+        if transaction.receipt:
+            try:
+                await delete_image(uid, transaction.receipt)
+            except Exception as e:
+                print("error deleting image", e)
+        try:
+            receipt_path = await save_image(uid, receipt)
+            update_data["receipt"] = receipt_path
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to save the image.",
+            )
+
+    query = Transaction.__table__.update().where(Transaction.tid == tid).values(**update_data)
+    await database.execute(query)
+
+    return {"message": "Transaction successfully updated."}
+
+
+# API to delete a transaction
+@router.delete("/delete-transaction/")
+async def delete_transaction(
+    uid: int = Depends(get_current_uid),
+    tid: int = Query(...),
+):
+    query = (
+        Transaction.__table__
+        .select()
+        .where((Transaction.tid == tid) & (Transaction.uid == uid))
+    )
+    transaction = await database.fetch_one(query)
+
+    if not transaction:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Transaction not found.")
+
+    tid_value = transaction.tid
+    await execute_del_transaction(uid, [tid_value])
+
+    return {"message": "Transaction successfully deleted."}
+
+""" app\route\db.py
+
+"""
+# app/route/test.py
+from fastapi import APIRouter
+
+router = APIRouter()
+
+@router.get("/test")
+async def test():
+    return {"message": "Test route works! version27"}
+
+""" app\route\test.py
+
+"""
+import os
+
+TARGET_EXT = ['.py', '.js', '.jsx'] # file extension
+
+def dump_all_files(root=".", output_name="output.txt"):
+    collected = []
+    for dirpath, _, filenames in os.walk(root):
+        for f in filenames:
+            _, ext = os.path.splitext(f)
+            if ext in TARGET_EXT:
+                full_path = os.path.join(dirpath, f)
+                rel_path = os.path.relpath(full_path, root)
+
+                with open(full_path, "r", encoding="utf-8", errors="ignore") as fp:
+                    content = fp.read()
+
+                collected.append(f'"""\n{content}\n""" {rel_path}')
+
+    with open(output_name, "w", encoding="utf-8") as out:
+        out.write("\n\n".join(collected))
+
+
+dump_all_files(".")
+
+""" example\source_collector.py

@@ -14,7 +14,6 @@ def initialize_firebase():
         return
 
     private_key = (os.getenv("FIREBASE_PRIVATE_KEY") or "").replace("\\n", "\n")
-
     service_account_key = {
         "type": os.getenv("FIREBASE_TYPE"),
         "project_id": os.getenv("FIREBASE_PROJECT_ID"),

@@ -1,17 +1,25 @@
+# app/lib/ai_receipt.py
+
 import re
-import uuid
-import shutil
-import tempfile
+import time
+from datetime import datetime
 from difflib import SequenceMatcher
-from pathlib import Path
+from io import BytesIO
 from typing import Any, List, Optional, Tuple
 
+import numpy as np
 from fastapi import UploadFile
 from PIL import Image, ImageOps
 from paddleocr import PaddleOCR
 
 
-DEFAULT_MAX_OCR_SIDE = 1400
+DEFAULT_MAX_OCR_SIDE = 1100
+DEBUG_TIMING = True
+
+TOP_CROP_RATIO = 0.22
+MIDDLE_START_RATIO = 0.38
+MIDDLE_END_RATIO = 0.82
+BOTTOM_CROP_RATIO = 0.25
 
 KNOWN_MERCHANTS = [
     "Walmart", "Walmart Supercentre", "Costco", "Costco Wholesale",
@@ -134,15 +142,6 @@ CATEGORY_KEYWORDS = {
     ],
 }
 
-TOTAL_PRIMARY_KEYWORDS = [
-    "grand total", "total due", "amount due", "balance due", "order total",
-    "take out total", "take-out total", "net total", "total",
-]
-
-TOTAL_SECONDARY_KEYWORDS = [
-    "payment", "approved amount", "credit card", "visa", "debit", "pin",
-]
-
 EXCLUDE_AMOUNT_KEYWORDS = [
     "subtotal", "sub total", "tax", "gst", "hst", "vat", "sales tax",
     "state tax", "tip", "suggested tip", "gratuity", "change", "change due",
@@ -158,18 +157,31 @@ ITEMISH_KEYWORDS = [
     "nuggets", "shake", "bread", "rice", "milk", "egg", "banana",
 ]
 
+DATE_HINT_KEYWORDS = [
+    "date", "transaction date", "order date", "invoice date", "purchase date",
+]
+
+_AMOUNT_PATTERN = re.compile(r"(?<![\d%])(\d{1,6}\.\d{2})(?![\d%])")
+
 _OCR_ENGINE: Optional[PaddleOCR] = None
-KNOWN_MERCHANTS_CANON = []
+KNOWN_MERCHANTS_CANON: List[Tuple[str, str]] = []
 BANNED_MERCHANT_PHRASES_CANON = set()
 
 
-def _init_caches():
+def _log_timing(label: str, started_at: float) -> None:
+    if DEBUG_TIMING:
+        print(f"[ai_receipt] {label}: {time.perf_counter() - started_at:.3f}s")
+
+
+def _init_caches() -> None:
     global KNOWN_MERCHANTS_CANON, BANNED_MERCHANT_PHRASES_CANON
+
     if not KNOWN_MERCHANTS_CANON:
         KNOWN_MERCHANTS_CANON = [
             (merchant, _canonicalize_for_match(merchant))
             for merchant in KNOWN_MERCHANTS
         ]
+
     if not BANNED_MERCHANT_PHRASES_CANON:
         BANNED_MERCHANT_PHRASES_CANON = {
             _canonicalize_for_match(x) for x in BANNED_MERCHANT_PHRASES
@@ -178,15 +190,18 @@ def _init_caches():
 
 def _get_ocr_engine() -> PaddleOCR:
     global _OCR_ENGINE
+
     if _OCR_ENGINE is None:
+        t0 = time.perf_counter()
         _OCR_ENGINE = PaddleOCR(
-            lang="en",
             text_detection_model_name="PP-OCRv5_mobile_det",
             text_recognition_model_name="en_PP-OCRv5_mobile_rec",
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False,
         )
+        _log_timing("ocr_engine_init", t0)
+
     return _OCR_ENGINE
 
 
@@ -212,74 +227,132 @@ def _canonicalize_for_match(text: str) -> str:
     return text
 
 
-def _recursive_collect_strings(obj: Any) -> List[str]:
+def _extract_texts_from_ocr_result(result: Any) -> List[str]:
     found: List[str] = []
+    seen = set()
 
-    def walk(x: Any):
-        if x is None:
+    def add_text(value: str) -> None:
+        s = _normalize_whitespace(value)
+        if not _looks_meaningful_text(s):
             return
-        if isinstance(x, str):
-            s = _normalize_whitespace(x)
-            if _looks_meaningful_text(s):
-                found.append(s)
+        key = s.lower()
+        if key in seen:
             return
-        if isinstance(x, dict):
-            for key in ("rec_texts", "texts", "text", "label_names", "labels", "transcription", "transcriptions"):
-                if key in x:
-                    walk(x[key])
-            for value in x.values():
-                walk(value)
+        seen.add(key)
+        found.append(s)
+
+    def walk(obj: Any) -> None:
+        if obj is None:
             return
-        if isinstance(x, (list, tuple, set)):
-            for item in x:
+
+        if isinstance(obj, str):
+            add_text(obj)
+            return
+
+        if isinstance(obj, dict):
+            for key in ("rec_texts", "texts", "text", "label_names", "labels"):
+                value = obj.get(key)
+                if isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, str):
+                            add_text(item)
+                elif isinstance(value, str):
+                    add_text(value)
+
+            if "res" in obj:
+                walk(obj["res"])
+            elif "result" in obj:
+                walk(obj["result"])
+            return
+
+        if isinstance(obj, (list, tuple)):
+            for item in obj:
                 walk(item)
             return
-        if hasattr(x, "__dict__"):
-            walk(vars(x))
 
-    walk(obj)
+        if hasattr(obj, "rec_texts"):
+            try:
+                for item in getattr(obj, "rec_texts", []):
+                    if isinstance(item, str):
+                        add_text(item)
+            except Exception:
+                pass
+            return
 
-    deduped: List[str] = []
-    seen = set()
-    for item in found:
-        key = item.lower()
-        if key not in seen:
-            seen.add(key)
-            deduped.append(item)
-    return deduped
+        if hasattr(obj, "__dict__"):
+            data = vars(obj)
+            if "rec_texts" in data:
+                walk(data["rec_texts"])
+            elif "res" in data:
+                walk(data["res"])
+
+    walk(result)
+    return found
 
 
-def _prepare_image_for_ocr(image_path: Path, max_side: int = DEFAULT_MAX_OCR_SIDE) -> Image.Image:
-    img = Image.open(image_path)
+def _image_bytes_to_pil(image_bytes: bytes) -> Image.Image:
+    img = Image.open(BytesIO(image_bytes))
     img = ImageOps.exif_transpose(img)
-
     if img.mode != "RGB":
         img = img.convert("RGB")
-
-    w, h = img.size
-    longest = max(w, h)
-
-    if longest > max_side:
-        scale = max_side / float(longest)
-        new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
-        img = img.resize(new_size, Image.LANCZOS)
-
     return img
 
 
-def _run_ocr(image_path: Path) -> List[str]:
+def _resize_if_needed(img: Image.Image, max_side: int = DEFAULT_MAX_OCR_SIDE) -> Image.Image:
+    w, h = img.size
+    longest = max(w, h)
+
+    if longest <= max_side:
+        return img
+
+    scale = max_side / float(longest)
+    new_size = (max(1, int(w * scale)), max(1, int(h * scale)))
+    return img.resize(new_size, Image.LANCZOS)
+
+
+def _pil_to_numpy(img: Image.Image) -> np.ndarray:
+    return np.array(img)
+
+
+def _crop_top(img: Image.Image, ratio: float = TOP_CROP_RATIO) -> Image.Image:
+    w, h = img.size
+    return img.crop((0, 0, w, max(1, int(h * ratio))))
+
+
+def _crop_middle(img: Image.Image, start_ratio: float = MIDDLE_START_RATIO, end_ratio: float = MIDDLE_END_RATIO) -> Image.Image:
+    w, h = img.size
+    y1 = max(0, int(h * start_ratio))
+    y2 = min(h, int(h * end_ratio))
+    if y2 <= y1:
+        y1, y2 = 0, h
+    return img.crop((0, y1, w, y2))
+
+
+def _crop_bottom(img: Image.Image, ratio: float = BOTTOM_CROP_RATIO) -> Image.Image:
+    w, h = img.size
+    start_y = max(0, int(h * (1.0 - ratio)))
+    return img.crop((0, start_y, w, h))
+
+
+def _run_ocr_on_pil(img: Image.Image, label: str) -> List[str]:
+    t0 = time.perf_counter()
     ocr = _get_ocr_engine()
+    _log_timing(f"{label}_get_ocr_engine", t0)
 
-    temp_dir = Path(tempfile.mkdtemp(prefix="receipt_ocr_"))
-    temp_file = temp_dir / f"{uuid.uuid4().hex}.png"
+    t1 = time.perf_counter()
+    resized = _resize_if_needed(img)
+    image_np = _pil_to_numpy(resized)
+    _log_timing(f"{label}_prepare_image", t1)
 
-    try:
-        prepared_img = _prepare_image_for_ocr(image_path)
-        prepared_img.save(temp_file, format="PNG")
-        result = ocr.predict(str(temp_file))
-        return _recursive_collect_strings(result)
-    finally:
-        shutil.rmtree(temp_dir, ignore_errors=True)
+    t2 = time.perf_counter()
+    result = ocr.predict(image_np)
+    _log_timing(f"{label}_ocr_predict", t2)
+
+    t3 = time.perf_counter()
+    lines = _extract_texts_from_ocr_result(result)
+    _log_timing(f"{label}_extract_texts", t3)
+
+    return lines
 
 
 def _score_category(lines: List[str]) -> str:
@@ -310,21 +383,22 @@ def _normalize_merchant_name(candidate: str) -> Optional[str]:
     if not cand or cand in BANNED_MERCHANT_PHRASES_CANON:
         return None
 
+    for merchant, merchant_canon in KNOWN_MERCHANTS_CANON:
+        if cand and len(cand) >= 4 and (cand in merchant_canon or merchant_canon in cand):
+            return merchant
+
     best_match = None
     best_score = 0.0
 
     for merchant, merchant_canon in KNOWN_MERCHANTS_CANON:
-        if cand and len(cand) >= 4 and (cand in merchant_canon or merchant_canon in cand):
-            score = 0.90
-        else:
-            score = SequenceMatcher(None, cand, merchant_canon).ratio()
-
+        score = SequenceMatcher(None, cand, merchant_canon).ratio()
         if score > best_score:
             best_score = score
             best_match = merchant
 
     if best_score >= 0.86:
         return best_match
+
     return None
 
 
@@ -366,7 +440,7 @@ def _extract_merchant(lines: List[str]) -> Optional[str]:
 
         merchant_canon = _canonicalize_for_match(merchant)
         if norm and len(norm) >= 4 and (norm in merchant_canon or merchant_canon in norm):
-            score = 0.90
+            score = 0.95
         else:
             score = SequenceMatcher(None, norm, merchant_canon).ratio()
 
@@ -376,6 +450,7 @@ def _extract_merchant(lines: List[str]) -> Optional[str]:
 
     if best_score >= 0.86:
         return best_match
+
     return None
 
 
@@ -383,6 +458,7 @@ def _extract_description(lines: List[str]) -> Optional[str]:
     merchant = _extract_merchant(lines)
     if merchant:
         return merchant
+
     category = _score_category(lines)
     return category if category else None
 
@@ -393,10 +469,9 @@ def _normalize_line_for_amount(line: str) -> str:
 
 def _extract_amounts_from_line(line: str) -> List[float]:
     normalized = _normalize_line_for_amount(line)
-    pattern = re.compile(r"(?<![\d%])(\d{1,6}\.\d{2})(?![\d%])")
     values: List[float] = []
 
-    for m in pattern.findall(normalized):
+    for m in _AMOUNT_PATTERN.findall(normalized):
         try:
             values.append(float(m))
         except ValueError:
@@ -414,22 +489,6 @@ def _is_excluded_amount_line(line: str) -> bool:
     return _contains_any(norm, EXCLUDE_AMOUNT_KEYWORDS)
 
 
-def _is_primary_total_line(line: str) -> bool:
-    norm = _canonicalize_for_match(line)
-    if "subtotal" in norm or "sub total" in norm:
-        return False
-    if "total tax" in norm or "total savings" in norm or "total discount" in norm:
-        return False
-    return _contains_any(norm, TOTAL_PRIMARY_KEYWORDS)
-
-
-def _is_secondary_total_line(line: str) -> bool:
-    norm = _canonicalize_for_match(line)
-    if _is_excluded_amount_line(line):
-        return False
-    return _contains_any(norm, TOTAL_SECONDARY_KEYWORDS)
-
-
 def _looks_like_item_line(line: str) -> bool:
     norm = _canonicalize_for_match(line)
     if _contains_any(norm, ITEMISH_KEYWORDS):
@@ -439,35 +498,128 @@ def _looks_like_item_line(line: str) -> bool:
     return False
 
 
-def _pick_best_amount_from_line(line: str) -> Optional[float]:
-    vals = [v for v in _extract_amounts_from_line(line) if v > 0]
-    if not vals:
+def _normalize_date_candidate(text: str) -> str:
+    text = _normalize_whitespace(text)
+    text = text.replace("O", "0").replace("o", "0")
+    text = text.replace(".", "/").replace("-", "/")
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def _try_parse_date(date_str: str) -> Optional[str]:
+    formats = [
+        "%Y/%m/%d",
+        "%Y/%m/%d %H:%M",
+        "%Y/%m/%d %H:%M:%S",
+        "%m/%d/%Y",
+        "%m/%d/%Y %H:%M",
+        "%m/%d/%Y %H:%M:%S",
+        "%d/%m/%Y",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y %H:%M:%S",
+        "%m/%d/%y",
+        "%m/%d/%y %H:%M",
+        "%m/%d/%y %H:%M:%S",
+        "%d/%m/%y",
+        "%d/%m/%y %H:%M",
+        "%d/%m/%y %H:%M:%S",
+        "%b %d, %Y",
+        "%B %d, %Y",
+        "%d %b %Y",
+        "%d %B %Y",
+    ]
+
+    for fmt in formats:
+        try:
+            dt = datetime.strptime(date_str, fmt)
+            if 2000 <= dt.year <= 2100:
+                return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+
+    return None
+
+
+def _score_date_candidate(raw: str, line_idx: int) -> int:
+    score = 0
+    norm = _canonicalize_for_match(raw)
+
+    if line_idx < 12:
+        score += 3
+    elif line_idx < 24:
+        score += 1
+
+    if any(hint in norm for hint in DATE_HINT_KEYWORDS):
+        score += 4
+    if re.search(r"\b20\d{2}[/-]\d{1,2}[/-]\d{1,2}\b", raw):
+        score += 5
+    if re.search(r"\b\d{1,2}[/-]\d{1,2}[/-]20\d{2}\b", raw):
+        score += 4
+    if re.search(r"\b[A-Za-z]{3,9}\s+\d{1,2},\s*20\d{2}\b", raw):
+        score += 4
+    if re.search(r"\b\d{1,2}\s+[A-Za-z]{3,9}\s+20\d{2}\b", raw):
+        score += 4
+
+    return score
+
+
+def _extract_date(lines: List[str]) -> Optional[str]:
+    if not lines:
         return None
-    return vals[-1]
+
+    numeric_patterns = [
+        r"\b(20\d{2}[/-]\d{1,2}[/-]\d{1,2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?)\b",
+        r"\b(\d{1,2}[/-]\d{1,2}[/-]20\d{2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?)\b",
+        r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{2}(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?)\b",
+    ]
+
+    text_patterns = [
+        r"\b([A-Za-z]{3,9}\s+\d{1,2},\s*20\d{2})\b",
+        r"\b(\d{1,2}\s+[A-Za-z]{3,9}\s+20\d{2})\b",
+    ]
+
+    candidates: List[Tuple[int, str]] = []
+
+    for idx, line in enumerate(lines):
+        normalized = _normalize_date_candidate(line)
+
+        for pattern in numeric_patterns:
+            matches = re.findall(pattern, normalized)
+            for match in matches:
+                parsed = _try_parse_date(match)
+                if parsed:
+                    candidates.append((_score_date_candidate(match, idx), parsed))
+
+        for pattern in text_patterns:
+            matches = re.findall(pattern, line)
+            for match in matches:
+                parsed = _try_parse_date(match)
+                if parsed:
+                    candidates.append((_score_date_candidate(match, idx), parsed))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
 
 
 def _extract_cashflow(lines: List[str]) -> Optional[float]:
     if not lines:
         return None
 
-    primary_hits: List[Tuple[int, float]] = []
-    secondary_hits: List[Tuple[int, float]] = []
+    candidates: List[Tuple[int, float, int, str]] = []
     subtotal_hits: List[Tuple[int, float]] = []
     tax_hits: List[Tuple[int, float]] = []
 
     for idx, line in enumerate(lines):
         norm = _canonicalize_for_match(line)
-        amount = _pick_best_amount_from_line(line)
-        if amount is None or amount <= 0:
+        vals = [v for v in _extract_amounts_from_line(line) if v > 0]
+        if not vals:
             continue
 
-        if _is_primary_total_line(line):
-            primary_hits.append((idx, amount))
-            continue
-
-        if _is_secondary_total_line(line):
-            secondary_hits.append((idx, amount))
-            continue
+        amount = vals[-1]
+        score = 0
 
         if "subtotal" in norm or "sub total" in norm:
             subtotal_hits.append((idx, amount))
@@ -478,67 +630,175 @@ def _extract_cashflow(lines: List[str]) -> Optional[float]:
                 tax_hits.append((idx, amount))
             continue
 
-    if primary_hits:
-        return primary_hits[-1][1]
+        strong_total_keywords = [
+            "grand total", "amount due", "balance due", "total due",
+            "net total", "order total", "take out total", "take out",
+            "take-out total", "amount paid", "total purchase"
+        ]
+        if any(k in norm for k in strong_total_keywords):
+            score += 120
+
+        if "total" in norm and "subtotal" not in norm and "sub total" not in norm:
+            score += 70
+
+        payment_keywords = [
+            "payment", "approved amount", "approved", "credit card",
+            "debit", "visa", "mastercard", "amex", "paid"
+        ]
+        if any(k in norm for k in payment_keywords):
+            score += 35
+
+        score += idx * 3
+
+        if amount < 1:
+            score -= 30
+        elif amount < 5:
+            score -= 10
+
+        if _is_excluded_amount_line(line):
+            score -= 120
+
+        if _looks_like_item_line(line):
+            score -= 60
+
+        alpha_count = len(re.sub(r"[^A-Za-z]", "", line))
+        if alpha_count == 0:
+            score -= 20
+
+        candidates.append((idx, amount, score, line))
+
+    print("CASHFLOW_CANDIDATES =", candidates)
+    print("SUBTOTAL_HITS =", subtotal_hits)
+    print("TAX_HITS =", tax_hits)
+
+    strong = [x for x in candidates if x[2] >= 80]
+    if strong:
+        strong.sort(key=lambda x: (x[2], x[0], x[1]), reverse=True)
+        return strong[0][1]
 
     if subtotal_hits and tax_hits:
         subtotal = subtotal_hits[-1][1]
         tax = tax_hits[-1][1]
-        expected = round(subtotal + tax, 2)
-        for _, amt in secondary_hits:
-            if abs(amt - expected) <= 0.05:
-                return amt
+        combined = round(subtotal + tax, 2)
 
-    if secondary_hits:
-        return secondary_hits[-1][1]
+        near_combined = [
+            x for x in candidates
+            if abs(x[1] - combined) <= 0.05 and x[2] > -50
+        ]
+        if near_combined:
+            near_combined.sort(key=lambda x: (x[2], x[0]), reverse=True)
+            return near_combined[0][1]
 
-    if subtotal_hits and tax_hits:
-        return round(subtotal_hits[-1][1] + tax_hits[-1][1], 2)
+        return combined
 
-    fallback_candidates: List[Tuple[int, float]] = []
+    if candidates:
+        candidates.sort(key=lambda x: (x[2], x[0], x[1]), reverse=True)
+        best = candidates[0]
+        if best[2] >= 20:
+            return best[1]
+
+    fallback_vals: List[Tuple[int, float]] = []
     for idx, line in enumerate(lines):
         if _is_excluded_amount_line(line):
             continue
-        if _looks_like_item_line(line):
-            continue
         vals = [v for v in _extract_amounts_from_line(line) if v > 0]
         for v in vals:
-            fallback_candidates.append((idx, v))
+            fallback_vals.append((idx, v))
 
-    if fallback_candidates:
-        fallback_candidates.sort(key=lambda x: x[0], reverse=True)
-        return fallback_candidates[0][1]
+    if fallback_vals:
+        fallback_vals.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        return fallback_vals[0][1]
 
     return None
 
 
+def _merge_unique_lines(*groups: List[str]) -> List[str]:
+    result: List[str] = []
+    seen = set()
+
+    for group in groups:
+        for line in group:
+            key = line.lower()
+            if key not in seen:
+                seen.add(key)
+                result.append(line)
+
+    return result
+
+
 async def extract_receipt_info(receipt: UploadFile) -> Optional[dict]:
+    print("version_3")
+    total_t0 = time.perf_counter()
+
     if not receipt or not receipt.filename:
         return None
 
-    suffix = Path(receipt.filename).suffix.lower() or ".png"
-    if suffix not in {".jpg", ".jpeg", ".png", ".webp", ".bmp"}:
+    lower_name = receipt.filename.lower()
+    if not lower_name.endswith((".jpg", ".jpeg", ".png", ".webp", ".bmp")):
         return None
 
-    temp_dir = Path(tempfile.mkdtemp(prefix="receipt_input_"))
-    temp_file = temp_dir / f"{uuid.uuid4().hex}{suffix}"
+    print("DEFAULT_MAX_OCR_SIDE", DEFAULT_MAX_OCR_SIDE)
 
     try:
+        t0 = time.perf_counter()
         content = await receipt.read()
+        _log_timing("read_upload", t0)
+
         if not content:
             return None
 
-        with open(temp_file, "wb") as f:
-            f.write(content)
+        t1 = time.perf_counter()
+        original_img = _image_bytes_to_pil(content)
+        _log_timing("open_image", t1)
 
-        lines = _run_ocr(temp_file)
-        if not lines:
-            return {"cashflow": None, "description": None}
+        t2 = time.perf_counter()
+        top_img = _crop_top(original_img)
+        middle_img = _crop_middle(original_img)
+        bottom_img = _crop_bottom(original_img)
+        _log_timing("crop_image", t2)
 
-        return {
-            "cashflow": _extract_cashflow(lines),
-            "description": _extract_description(lines),
+        top_lines = _run_ocr_on_pil(top_img, "top")
+        middle_lines = _run_ocr_on_pil(middle_img, "middle")
+        bottom_lines = _run_ocr_on_pil(bottom_img, "bottom")
+
+        merged_lines = _merge_unique_lines(top_lines, middle_lines, bottom_lines)
+        cashflow_lines = _merge_unique_lines(middle_lines, bottom_lines)
+
+        print("TOP_LINES =", top_lines)
+        print("MIDDLE_LINES =", middle_lines)
+        print("BOTTOM_LINES =", bottom_lines)
+        print("MERGED_LINES =", merged_lines)
+        print("CASHFLOW_LINES =", cashflow_lines)
+
+        date_value = _extract_date(top_lines) or _extract_date(merged_lines)
+        description_value = _extract_description(top_lines) or _extract_description(merged_lines)
+
+        full_lines: List[str] = []
+
+        cashflow_value = _extract_cashflow(middle_lines)
+        if cashflow_value is None:
+            cashflow_value = _extract_cashflow(cashflow_lines)
+        if cashflow_value is None:
+            full_lines = _run_ocr_on_pil(original_img, "full_cashflow_fallback")
+            print("FULL_CASHFLOW_LINES =", full_lines)
+            cashflow_value = _extract_cashflow(full_lines)
+
+        if not date_value and not description_value:
+            if not full_lines:
+                full_lines = _run_ocr_on_pil(original_img, "full_header_fallback")
+            date_value = date_value or _extract_date(full_lines)
+            description_value = description_value or _extract_description(full_lines)
+
+        t3 = time.perf_counter()
+        result = {
+            "date": date_value,
+            "cashflow": cashflow_value,
+            "description": description_value,
         }
+        _log_timing("post_process", t3)
+        _log_timing("extract_receipt_info_total", total_t0)
+
+        return result
 
     except Exception as e:
         print(f"Failed to extract receipt info: {e}")
@@ -549,4 +809,3 @@ async def extract_receipt_info(receipt: UploadFile) -> Optional[dict]:
             await receipt.seek(0)
         except Exception:
             pass
-        shutil.rmtree(temp_dir, ignore_errors=True)

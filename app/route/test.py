@@ -20,6 +20,7 @@ async def test_receipt(receipt: UploadFile = File(...)):
 
     return {
         "status": True,
+        "date": result.get("date"),
         "cashflow": result.get("cashflow"),
         "description": result.get("description"),
     }

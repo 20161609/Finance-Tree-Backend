@@ -35,6 +35,7 @@ class Auth(Base):
     create_time = Column(TIMESTAMP, default=datetime.utcnow)  # Account creation time
     update_time = Column(TIMESTAMP, default=datetime.utcnow)  # Last update time
     useai = Column(Boolean, default=False)  # Use AI for transaction categorization
+    display_currency = Column(String(10), nullable=False, default="CAD")
 
 # Branch model for organizing branches
 class Branch(Base):

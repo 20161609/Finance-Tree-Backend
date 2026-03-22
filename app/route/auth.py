@@ -162,6 +162,8 @@ async def signup(data: dict = Body(...)):
         email=email,
         password=hash_password(password),
         create_time=datetime.utcnow(),
+        display_currency='CAD',
+        useai=True
     )
     await database.execute(query)
     user = await database.fetch_one(Auth.__table__.select().where(Auth.email == email))
@@ -347,11 +349,13 @@ async def update_user(
     uid: int = Depends(get_current_uid),
     username: Optional[str] = Form(None),
     useai: Optional[bool] = Form(None),
+    display_currency: Optional[str] = Form(None)
 ):
     try:
         update_query = Auth.__table__.update().where(Auth.uid == uid).values(
             username=username,
             useai=useai,
+            display_currency=display_currency,
         )
         await database.execute(update_query)
     except Exception as e:

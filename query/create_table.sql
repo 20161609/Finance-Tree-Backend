@@ -8,6 +8,7 @@ CREATE TABLE auth (
     create_time TIMESTAMP DEFAULT NOW(),
     update_time TIMESTAMP DEFAULT NOW(),
     useai BOOLEAN DEFAULT FALSE
+    display_currency VARCHAR(10) NOT NULL DEFAULT 'CAD'    
 );
 
 -- Role table

@@ -9,6 +9,7 @@ from app.route import test
 from app.firebase.init import initialize_firebase
 import os
 from dotenv import load_dotenv
+from app.lib.ai_receipt import _get_ocr_engine
 
 # Load environment variables
 load_dotenv()
@@ -43,8 +44,10 @@ initialize_firebase()
 @app.on_event("startup")
 async def startup():
     print("Connecting to the database")
-    Base.metadata.create_all(bind=engine)    
+    Base.metadata.create_all(bind=engine)
     await database.connect()
+    _get_ocr_engine()
+
 
 # Disconnect from the database on shutdown
 @app.on_event("shutdown")

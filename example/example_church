@@ -1,0 +1,63 @@
+Home
+├─ Budget
+│  ├─ Annual Budget
+│  ├─ Special Offering Support
+│  ├─ Church Support
+│  └─ Member Contribution
+│
+├─ Operation
+│  ├─ Snacks
+│  ├─ Drinks
+│  ├─ Meal
+│  ├─ Supplies
+│  ├─ Printing
+│  └─ Transportation
+│
+├─ Worship
+│  ├─ Worship Supplies
+│  ├─ Prayer Meeting
+│  ├─ Bible Study Materials
+│  └─ Praise Team Support
+│
+├─ Fellowship
+│  ├─ Regular Meeting
+│  ├─ Welcome Gathering
+│  ├─ Birthday Support
+│  ├─ Small Group Activity
+│  └─ Retreat Fellowship
+│
+├─ Event
+│  ├─ Retreat
+│  │  ├─ Retreat Meal
+│  │  ├─ Retreat Snacks
+│  │  ├─ Retreat Transport
+│  │  ├─ Retreat Supplies
+│  │  └─ Retreat Venue
+│  │
+│  ├─ Outreach
+│  │  ├─ Outreach Meal
+│  │  ├─ Outreach Gift
+│  │  ├─ Outreach Supplies
+│  │  └─ Outreach Transport
+│  │
+│  ├─ Newcomer Event
+│  │  ├─ Meal
+│  │  ├─ Gift
+│  │  └─ Promotion
+│  │
+│  └─ Year-end Gathering
+│     ├─ Meal
+│     ├─ Prize
+│     ├─ Supplies
+│     └─ Decoration
+│
+├─ Support
+│  ├─ Member Care
+│  ├─ Emergency Support
+│  ├─ Gift
+│  └─ Celebration
+│
+└─ Reserve
+   ├─ Emergency Fund
+   └─ Unallocated
+

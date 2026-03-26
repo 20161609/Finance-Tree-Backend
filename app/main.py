@@ -16,25 +16,20 @@ load_dotenv()
 
 FRONT_URL = os.getenv("FRONT_URL")
 BACK_URL = os.getenv("BACK_URL")
+VERSION = os.getenv("VERSION")
+ENV = os.getenv("ENV", "dev")  # dev / prod
 
 # Create FastAPI instance
 app = FastAPI()
 
-# CORS configuration (Bearer Token + Header -> No neccesary for credentials)
-ALLOWED_ORIGINS = [
-    FRONT_URL if FRONT_URL else "https://finance-tree.vercel.app",
-    "http://localhost:3000",  # For local development
-]
-
-# Remove None & Duplication
-ALLOWED_ORIGINS = list({o for o in ALLOWED_ORIGINS if o})
-
+# CORS configuration
+ALLOWED_ORIGINS = [FRONT_URL if FRONT_URL else "https://finance-tree.vercel.app"]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=['*'],
-    allow_credentials=False,  # No cookie..
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ALLOWED_ORIGINS,
+    allow_credentials=False,  # No cookie-based auth
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 # Initialize Firebase
@@ -47,7 +42,6 @@ async def startup():
     Base.metadata.create_all(bind=engine)
     await database.connect()
     _get_ocr_engine()
-
 
 # Disconnect from the database on shutdown
 @app.on_event("shutdown")
@@ -63,7 +57,6 @@ app.include_router(test.router, prefix="/test")
 @app.get("/")
 async def root():
     return {
-        "message": "Version Code - 0.0.1",
-        "FRONT": FRONT_URL,
-        "BACK": BACK_URL,
+        "message": "Finance Tree API is running",
+        "version": VERSION
     }

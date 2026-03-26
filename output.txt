@@ -121,7 +121,7 @@ initialize_firebase()
 @app.on_event("startup")
 async def startup():
     print("Connecting to the database")
-    Base.metadata.create_all(bind=engine)    
+    Base.metadata.create_all(bind=engine)
     await database.connect()
     _get_ocr_engine()
 
@@ -438,6 +438,7 @@ class Auth(Base):
     create_time = Column(TIMESTAMP, default=datetime.utcnow)  # Account creation time
     update_time = Column(TIMESTAMP, default=datetime.utcnow)  # Last update time
     useai = Column(Boolean, default=False)  # Use AI for transaction categorization
+    display_currency = Column(String(10), nullable=False, default="CAD")
 
 # Branch model for organizing branches
 class Branch(Base):
@@ -1822,6 +1823,8 @@ async def signup(data: dict = Body(...)):
         email=email,
         password=hash_password(password),
         create_time=datetime.utcnow(),
+        display_currency='CAD',
+        useai=True
     )
     await database.execute(query)
     user = await database.fetch_one(Auth.__table__.select().where(Auth.email == email))
@@ -2007,11 +2010,13 @@ async def update_user(
     uid: int = Depends(get_current_uid),
     username: Optional[str] = Form(None),
     useai: Optional[bool] = Form(None),
+    display_currency: Optional[str] = Form(None)
 ):
     try:
         update_query = Auth.__table__.update().where(Auth.uid == uid).values(
             username=username,
             useai=useai,
+            display_currency=display_currency,
         )
         await database.execute(update_query)
     except Exception as e:
@@ -2440,30 +2445,3 @@ async def test_receipt(receipt: UploadFile = File(...)):
         "description": result.get("description"),
     }
 """ app\route\test.py
-
-"""
-import os
-
-TARGET_EXT = ['.py', '.js', '.jsx'] # file extension
-
-def dump_all_files(root=".", output_name="output.txt"):
-    collected = []
-    for dirpath, _, filenames in os.walk(root):
-        for f in filenames:
-            _, ext = os.path.splitext(f)
-            if ext in TARGET_EXT:
-                full_path = os.path.join(dirpath, f)
-                rel_path = os.path.relpath(full_path, root)
-
-                with open(full_path, "r", encoding="utf-8", errors="ignore") as fp:
-                    content = fp.read()
-
-                collected.append(f'"""\n{content}\n""" {rel_path}')
-
-    with open(output_name, "w", encoding="utf-8") as out:
-        out.write("\n\n".join(collected))
-
-
-dump_all_files(".")
-
-""" example\source_collector.py

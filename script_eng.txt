@@ -1,0 +1,199 @@
+[1]
+Hello everyone.
+
+With this video, I’d like to introduce a web app that I built myself,
+it's called Finance Tree.
+
+This app is not just a simple personal budget tool.
+I was thinking about small groups it's like churches, student clubs, and charity teams—
+it s kind of organizations that need financial management with a big scale,
+but they don't have any enough capacity for large and complicated financial systems.
+
+In reality, even when the amount of money is not very large,
+financial management in small organizations can become more complicated than expected.
+
+[2]
+For example,
+some money may be donations,
+some may be event expenses,
+some may be meal costs,
+and some transactions may belong to a specific department or a specific group.
+so many cases are confusing..
+
+But in many cases,
+most of transactions are managed with a single Excel file,
+with a group chat,
+paper receipts,
+or simply the personol memory.
+
+Maybe There're going be several problems.
+
+[3]
+First,
+the number of items,
+it becomes confusing where each transaction should belong.
+
+Second,
+transactions keep piling up,
+but later, it becomes difficult to understand
+which department, group, or purpose for each expense was actually related to.
+
+Third,
+when it's finally time to report,
+people often have to go back,
+search through old records,
+and organize everything again.
+
+Fourth,
+receipts and supporting documents also need to be collected separately,
+which means that the person managing the finances
+ends up doing a lot of repetitive manual work.
+
+[4]
+I wanted to solve that problem.
+
+So with Finance Tree,
+I designed the system to manage money
+not just as income and expense,
+but through a structure called branches.
+Branches are really important features in this application.
+
+In simple terms,
+it allows users to build categories like a tree structure,
+where smaller categories keep extending under larger ones like branches.
+
+[5]
+For example,
+under a top-level branch like Home,
+you could create major categories such as Worship, Mission, Education, or Events,
+and then add more detailed subcategories under each one.
+
+This makes the financial structure feel less like a long flat list,
+and more like an organized tree.
+
+Because of that,
+users can immediately understand
+which larger category a transaction belongs to,
+and how deep it goes within the hierarchy.
+
+Users can move through the branches they want,
+view only the transactions related to that branch,
+and also see their current location as a path.
+
+So rather than being just an app for recording transactions,
+I see Finance Tree as a tool for managing finances through structure.
+
+When adding a transaction,
+users can enter basic information such as date, amount, and description,
+and also connect that transaction to a specific branch.
+
+That means later,
+the system does not just show that money was spent.
+It also helps show why it was spent
+and which part of the organization it belonged to.
+
+I also wanted to support financial evidence and documentation,
+so I added the ability to handle receipt images as well.
+
+In particular,
+I implemented an OCR feature for receipts,
+so when a user uploads an image,
+the app can automatically read key information
+such as the date, amount, and description.
+
+Of course,
+OCR is not always perfect,
+but I believe it is meaningful because it reduces repetitive manual input.
+
+Another thing I considered very important in this app
+was not only recording transactions,
+but also organizing and reporting them.
+
+In small organizations,
+financial records often need to be explained to someone else.
+
+For example,
+how much money came in this month,
+how much was spent,
+how a specific category changed over time,
+or how money flowed through a certain branch.
+
+There is a limit to explaining these things only with words.
+
+So Finance Tree allows users
+to gather transactions by period,
+analyze income and expenses by branch,
+and review monthly financial flow.
+
+And it does not stop there.
+
+I also designed the system
+so the data can be organized into report files.
+
+In other words,
+the goal is not just to view data inside the app,
+but to make it possible to share, submit, or archive financial information in a practical format.
+
+To summarize,
+I believe this app is especially useful for the following users.
+
+First,
+people who manage finances for small churches or church departments.
+
+Second,
+people running clubs, charity groups, or small communities
+who want to manage shared money more transparently.
+
+Third,
+people who feel that Excel alone is no longer enough,
+and want to organize financial items in a more structured way.
+
+Fourth,
+people who want to manage transactions, receipts, and reports
+within one connected workflow.
+
+At the same time,
+this app is not meant to replace a full-scale accounting system for large organizations.
+
+Instead,
+it is closer to a practical financial management tool
+for small teams that need something realistic and structured.
+
+While building this app,
+my goal was not to create a complicated accounting platform.
+
+My goal was to build a tool
+that helps small organizations manage finances in a more structured way.
+
+Recording money itself may not be the hardest part.
+
+What is much harder
+is leaving records in a way that people can still understand later,
+and organizing them in a form that can be explained when needed.
+
+That is exactly the problem Finance Tree tries to address.
+
+It creates structure through branches,
+connects transactions to that structure,
+attaches supporting evidence,
+and finally organizes everything into reports.
+
+I built Finance Tree
+because I wanted to make financial management for small organizations
+more transparent,
+more structured,
+and less overwhelming.
+
+Going forward,
+I believe this project can be expanded even further
+with features such as budget versus actual tracking,
+role-based permissions,
+approval workflows,
+and collaboration at the organizational level.
+
+In this video,
+I introduced Finance Tree
+by focusing on the problem it tries to solve
+and the kinds of users it can be useful for.
+
+Thank you for watching.
